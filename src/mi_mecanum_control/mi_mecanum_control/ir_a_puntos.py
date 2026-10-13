@@ -18,9 +18,12 @@ from geometry_msgs.msg import Twist
 from nav_msgs.msg import Odometry
 from rclpy.node import Node
 
-# ===== TODO: puntos de SU variante: (x [m], y [m], θ [rad]) =====
+# ===== Puntos de la VARIANTE D: (x [m], y [m], θ [rad]) =====
 PUNTOS = [
-    # (x, y, theta),
+    (-1.5, 0.0, 0.0),
+    (-1.5, 1.5, math.pi),
+    (0.0, 1.5, math.pi / 2),
+    (0.0, 0.0, 0.0),
 ]
 
 L1, L2, L3 = 1.0, 1.0, 1.5     # Λ = diag(λ1, λ2, λ3)
@@ -42,11 +45,33 @@ def ley_control(pose, meta):
     pose = (x, y, φ)      meta = (xd, yd, θd)
     Devuelve (u, v, r, alcanzado)
     """
-    # TODO 1: errores de posición (en odom) y de orientación (envuelto)
-    # TODO 2: ¿alcanzado? (TOL_POS y TOL_ANG) -> devolver 0, 0, 0, True
-    # TODO 3: ξ = J(φ)⁺ Λ e
-    # TODO 4: saturar la NORMA de (u, v) a V_MAX conservando la dirección, y |r| a R_MAX
-    raise NotImplementedError
+    x, y, phi = pose
+    xd, yd, thd = meta
+
+    # 1) Errores en odom (posición) y de orientación envuelto a [-π, π]
+    ex = xd - x
+    ey = yd - y
+    eth = envolver(thd - phi)
+
+    # 2) ¿Alcanzado?
+    if math.hypot(ex, ey) < TOL_POS and abs(eth) < TOL_ANG:
+        return 0.0, 0.0, 0.0, True
+
+    # 3) ξ = J(φ)⁺ Λ e. Para el holonómico J(φ) es una rotación (cuadrada e
+    #    invertible), así que J⁺ = J⁻¹ = Jᵀ. No hay fase de "girar en el sitio":
+    #    traslación y orientación se controlan de forma independiente.
+    c, s = math.cos(phi), math.sin(phi)
+    u = c * L1 * ex + s * L2 * ey
+    v = -s * L1 * ex + c * L2 * ey
+    r = L3 * eth
+
+    # 4) Saturación: norma de (u, v) conservando la dirección, y |r|
+    norma = math.hypot(u, v)
+    if norma > V_MAX:
+        u *= V_MAX / norma
+        v *= V_MAX / norma
+    r = max(-R_MAX, min(R_MAX, r))
+    return u, v, r, False
 
 
 class IrAPuntos(Node):

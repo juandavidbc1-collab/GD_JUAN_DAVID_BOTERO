@@ -25,10 +25,10 @@ from sensor_msgs.msg import JointState
 from std_msgs.msg import Float64
 from tf2_ros import TransformBroadcaster
 
-# ===== TODO: parámetros físicos de SU variante (deben coincidir con el xacro) =====
-A_RUEDA = None     # a  : rueda_radio
-LX = None          # lx : distancia_ejes / 2
-LY = None          # ly : separacion_ruedas / 2
+# ===== Parámetros físicos de la VARIANTE D (deben coincidir con el xacro) =====
+A_RUEDA = 0.050        # a  : rueda_radio
+LX = 0.40 / 2.0        # lx : distancia_ejes / 2     = 0.20 m
+LY = 0.30 / 2.0        # ly : separacion_ruedas / 2  = 0.15 m
 
 RUEDAS = ['del_izq', 'del_der', 'tra_izq', 'tra_der']
 JOINTS = [f'joint_rueda_{p}' for p in RUEDAS]
@@ -36,9 +36,19 @@ TOPICOS = [f'/vel_rueda_{p}' for p in RUEDAS]
 
 
 def matriz_W(a, lx, ly):
-    """Cinemática directa del Mecanum: ξ = W ω  (3x4)."""
-    # TODO
-    raise NotImplementedError
+    """Cinemática directa del Mecanum: ξ = W ω  (3x4).
+
+    Orden de ω: [del_izq, del_der, tra_izq, tra_der] (coherente con sdf_mecanum.py):
+        u = a/4 ( ω_di + ω_dd + ω_ti + ω_td)
+        v = a/4 (-ω_di + ω_dd + ω_ti - ω_td)
+        r = a/(4(lx+ly)) (-ω_di + ω_dd - ω_ti + ω_td)
+    """
+    k = lx + ly
+    return (a / 4.0) * np.array([
+        [1.0, 1.0, 1.0, 1.0],
+        [-1.0, 1.0, 1.0, -1.0],
+        [-1.0 / k, 1.0 / k, -1.0 / k, 1.0 / k],
+    ])
 
 
 def envolver(a):
@@ -48,15 +58,18 @@ def envolver(a):
 
 def integrar(x, y, phi, u, v, r, dt):
     """η̇ = J(φ) ξ e integración de Euler. Devuelve (x, y, φ) con φ en [-π, π]."""
-    # TODO: ojo, u y v están en el marco del robot, no en odom
-    raise NotImplementedError
+    c, s = math.cos(phi), math.sin(phi)
+    x += (c * u - s * v) * dt
+    y += (s * u + c * v) * dt
+    phi = envolver(phi + r * dt)
+    return x, y, phi
 
 
 class Cinematica(Node):
     def __init__(self):
         super().__init__('cinematica')
         self.W = matriz_W(A_RUEDA, LX, LY)
-        self.W_pinv = None   # TODO: ω = W⁺ ξ
+        self.W_pinv = np.linalg.pinv(self.W)   # ω = W⁺ ξ  (4x3)
 
         # Inversa
         self.create_subscription(Twist, '/cmd_vel', self.cb_cmd_vel, 10)
@@ -75,8 +88,10 @@ class Cinematica(Node):
 
     # ---------- Cinemática inversa: ω = W⁺ ξ ----------
     def cb_cmd_vel(self, msg):
-        # TODO: armar ξ desde msg, calcular ω y publicar cada ω en su publisher (Float64)
-        pass
+        xi = np.array([msg.linear.x, msg.linear.y, msg.angular.z])
+        omega = self.W_pinv @ xi
+        for pub, w in zip(self.pubs, omega):
+            pub.publish(Float64(data=float(w)))
 
     # ---------- Cinemática directa: ξ = W ω, y odometría ----------
     def cb_joints(self, msg):
@@ -95,8 +110,8 @@ class Cinematica(Node):
         if dt <= 0.0:
             return
 
-        # TODO: calcular u, v, r con W y actualizar self.x, self.y, self.phi
-        u = v = r = 0.0
+        u, v, r = self.W @ omega
+        self.x, self.y, self.phi = integrar(self.x, self.y, self.phi, u, v, r, dt)
 
         qz, qw = math.sin(self.phi / 2.0), math.cos(self.phi / 2.0)
         stamp = ahora.to_msg()
@@ -105,7 +120,13 @@ class Cinematica(Node):
         odom.header.stamp = stamp
         odom.header.frame_id = 'odom'
         odom.child_frame_id = 'base_link'
-        # TODO: llenar odom.pose.pose (posición y orientación) y odom.twist.twist (u, v, r)
+        odom.pose.pose.position.x = self.x
+        odom.pose.pose.position.y = self.y
+        odom.pose.pose.orientation.z = qz
+        odom.pose.pose.orientation.w = qw
+        odom.twist.twist.linear.x = float(u)
+        odom.twist.twist.linear.y = float(v)
+        odom.twist.twist.angular.z = float(r)
         self.pub_odom.publish(odom)
 
         t = TransformStamped()
